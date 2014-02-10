@@ -15,6 +15,7 @@
 
 use std::cast;
 use std::fmt;
+use std::num;
 
 use FloatNaN;
 use BinaryInterchange;
@@ -144,11 +145,14 @@ impl BinaryInterchange<u32> for SoftF32 {
     }
 }
 
-fn shift_right_jamming(a: u32, count: u32) -> u32 {
-    if (count > 31) {
-        return if a.trailing_zeros() < count { 1 } else { 0 };
+fn shift_right_jamming<T: num::ToPrimitive>(a: T, count: T) -> u32 {
+    let v: u64 = a.to_u64().unwrap();
+    let c: u64 = count.to_u64().unwrap();
+
+    if (c > 63) {
+        return if v == 0 { 0 } else { 1 };
     } else {
-        return (a >> count) | if a.trailing_zeros() < count { 1 } else { 0 };
+        return ((v >> c) as u32) | (if v.trailing_zeros() < c { 1 } else { 0 });
     }
 }
 
@@ -158,6 +162,12 @@ fn propagate_nan(a: &SoftF32, b: &SoftF32) -> SoftF32 {
     // TODO: Check signalling
 
     return if (a_is_nan) { a.clone() } else { b.clone() };
+}
+
+fn normalize_subnormal(a_man: u32) -> (int, u32) {
+    let sc = a_man.leading_zeros() - 8;
+
+    return (1 - (sc as int), a_man << sc);
 }
 
 fn add_float(a: &SoftF32, b: &SoftF32, sign: bool) -> SoftF32 {
@@ -234,10 +244,10 @@ impl Add<SoftF32, SoftF32> for SoftF32 {
 
         let (a, b) = if swap { (other, self) } else { (self, other) };
 
-        return if (self.sign() == other.sign()) {
-            add_float(a, b, self.sign())
+        if (self.sign() == other.sign()) {
+            return add_float(a, b, self.sign())
         } else {
-            sub_float(a, b, self.sign() ^ swap)
+            return sub_float(a, b, self.sign() ^ swap)
         }
     }
 }
@@ -255,6 +265,55 @@ impl Sub<SoftF32, SoftF32> for SoftF32 {
             return sub_float(a, b, self.sign() ^ swap);
         } else {
             return add_float(a, b, self.sign());
+        }
+    }
+}
+
+impl Mul<SoftF32, SoftF32> for SoftF32 {
+    fn mul(&self, other: &SoftF32) -> SoftF32 {
+        let (a_exp, b_exp) = (self.biased_exponent(), other.biased_exponent());
+        let (a_man, b_man) = (self.significand(), other.significand());
+
+        let z_sign = !(self.sign() ^ other.sign());
+
+        if (a_exp == MAX_BIASED_EXP || b_exp == MAX_BIASED_EXP) {
+            if ((a_exp == MAX_BIASED_EXP) && (a_man != 0)) || ((b_exp == MAX_BIASED_EXP) && (b_man != 0)) {
+                return propagate_nan(self, other);
+            } else if ((a_man == 0) && (a_exp == 0)) || ((b_man == 0) && (b_exp == 0)) {
+                // TODO: Raise invalid flag
+                return SoftF32::nan();
+            } else {
+                return SoftF32::pack(z_sign, MAX_BIASED_EXP, 0);
+            }
+        }
+
+        let (a_exp, a_man) = if (a_exp == 0) {
+            if a_man == 0 {
+                return SoftF32::pack(z_sign, 0, 0);
+            } else {
+                normalize_subnormal(a_man)
+            }
+        } else {
+            (a_exp as int, a_man)
+        };
+
+        let (b_exp, b_man) = if (b_exp == 0) {
+            if b_man == 0 {
+                return SoftF32::pack(z_sign, 0, 0);
+            } else {
+                normalize_subnormal(b_man)
+            }
+        } else {
+            (b_exp as int, b_man)
+        };
+
+        let z_exp = a_exp + b_exp - 0x7F;
+        let z_man = shift_right_jamming(((a_man << 7)as u64) * ((b_man << 8) as u64), 32);
+
+        if (z_man << 1).leading_zeros() != 0 {
+            return SoftF32::round_and_pack(z_sign, (z_exp - 1), z_man << 1);
+        } else {
+            return SoftF32::round_and_pack(z_sign, z_exp, z_man);
         }
     }
 }
@@ -324,6 +383,24 @@ mod tests {
         }
     }))
 
+    macro_rules! test_mul(($a:expr, $b:expr, $r:expr) => ({
+        let (a, b, r) = (SoftF32::new($a), SoftF32::new($b), SoftF32::new($r));
+
+        let sum = a * b;
+
+        assert_eq!(sum.class(), r.class());
+
+        if (r.class() != FloatNaN) {
+            // println!("h: {:?} exp: {:?} sig: {:t}", r.sign(), r.biased_exponent(), r.significand_field());
+            // println!("s: {:?} exp: {:?} sig: {:t}", sum.sign(), sum.biased_exponent(), sum.significand_field());
+
+            assert_eq!(sum.sign(), r.sign());
+            assert_eq!(sum.biased_exponent(), r.biased_exponent());
+            assert_eq!(sum.significand_field(), r.significand_field());
+            assert_eq!(sum.binary(), r.binary());
+        }
+    }))
+
     #[test]
     fn test_specific_add() {
         test_add!(   8388750u32,   25174430u32,   27271618u32);
@@ -340,6 +417,12 @@ mod tests {
     fn test_specific_sub() {
         test_sub!( 126869781u32, 3102201224u32,  954717576u32);
         test_sub!( 126869781u32, 3102201224u32,  954717576u32);
+    }
+
+    #[test]
+    fn test_specific_mul() {
+        test_mul!(     18509u32,       6167u32,          0u32);
+        test_mul!(2445515395u32, 2958138854u32,   44050890u32);
     }
 
     #[test]
@@ -371,6 +454,25 @@ mod tests {
 
             let software = a - b;
             let hardware = SoftF32::from_f32(a.to_f32() - b.to_f32());
+
+            if (hardware.class() != FloatNaN) {
+                assert_eq!((a.binary(), b.binary(), software.binary()), (a.binary(), b.binary(), hardware.binary()));
+            } else {
+                assert_eq!(software.class(), hardware.class());
+            }
+        }
+    }
+
+    #[test]
+    fn test_random_mul() {
+        let mut rng: std::rand::XorShiftRng = SeedableRng::from_seed([9, 10, 11, 12]);
+
+        for _ in std::iter::range(0, 100000000) {
+            let a = SoftF32::new(rng.next_u32());
+            let b = SoftF32::new(rng.next_u32());
+
+            let software = a * b;
+            let hardware = SoftF32::from_f32(a.to_f32() * b.to_f32());
 
             if (hardware.class() != FloatNaN) {
                 assert_eq!((a.binary(), b.binary(), software.binary()), (a.binary(), b.binary(), hardware.binary()));
