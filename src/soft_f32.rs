@@ -318,6 +318,76 @@ impl Mul<SoftF32, SoftF32> for SoftF32 {
     }
 }
 
+impl Div<SoftF32, SoftF32> for SoftF32 {
+    fn div(&self, other: &SoftF32) -> SoftF32 {
+        let (a_exp, b_exp) = (self.biased_exponent(), other.biased_exponent());
+        let (a_man, b_man) = (self.significand(), other.significand());
+
+        let z_sign = !(self.sign() ^ other.sign());
+
+        if a_exp == MAX_BIASED_EXP {
+            if (a_man != 0) || ((b_exp == MAX_BIASED_EXP) && (b_man != 0)) {
+                return propagate_nan(self, other);
+            } else if b_exp == MAX_BIASED_EXP {
+                // TODO: Raise flag invalid
+                return SoftF32::nan();
+            } else {
+                return SoftF32::pack(z_sign, MAX_BIASED_EXP, 0);
+            }
+        } else if b_exp == MAX_BIASED_EXP {
+            if b_man != 0 {
+                return propagate_nan(self, other);
+            } else {
+                return SoftF32::pack(z_sign, 0, 0);
+            }
+        }
+
+        let (a_exp, a_man) = if a_exp == 0 {
+            if a_man != 0 {
+                normalize_subnormal(a_man)
+            } else {
+                return SoftF32::pack(z_sign, 0, 0);
+            }
+        } else {
+            (a_exp as int, a_man)
+        };
+
+        let (b_exp, b_man) = if b_exp == 0 {
+            if b_man != 0 {
+                normalize_subnormal(b_man)
+            } else {
+                if (a_exp == 0) && (a_man == 0) {
+                    // TODO: Raise flag invalid
+                    return SoftF32::nan();
+                } else {
+                    // TODO: Raise flag division by zero
+                    return SoftF32::pack(z_sign, MAX_BIASED_EXP, 0);
+                }
+            }
+        } else {
+            (b_exp as int, b_man)
+        };
+
+        let (a_man, b_man) = (a_man << 7, b_man << 8);
+
+        let (a_man, z_exp) = if b_man <= (a_man << 1) {
+            (a_man >> 1, a_exp - b_exp + 0x7E)
+        } else {
+            (a_man, a_exp - b_exp + 0x7D)
+        };
+
+        let z_man = ((a_man as u64) << 32) / (b_man as u64);
+
+        if (z_man & 0x3F) == 0 {
+            let t = ((b_man as u64) * z_man) != ((a_man as u64) << 32);
+            return SoftF32::round_and_pack(z_sign, z_exp, (z_man | if t { 1 } else { 0 }) as u32);
+        } else {
+            return SoftF32::round_and_pack(z_sign, z_exp, z_man as u32);
+        }
+    }
+}
+
+
 impl fmt::Default for SoftF32 {
     fn fmt(x: &SoftF32, f: &mut fmt::Formatter) {
         fmt::Default::fmt(&x.to_f32(), f)
@@ -426,6 +496,10 @@ mod tests {
     }
 
     #[test]
+    fn test_specific_div() {
+    }
+
+    #[test]
     fn test_random_add() {
         let mut rng: std::rand::XorShiftRng = SeedableRng::from_seed([1, 2, 3, 4]);
 
@@ -473,6 +547,25 @@ mod tests {
 
             let software = a * b;
             let hardware = SoftF32::from_f32(a.to_f32() * b.to_f32());
+
+            if (hardware.class() != FloatNaN) {
+                assert_eq!((a.binary(), b.binary(), software.binary()), (a.binary(), b.binary(), hardware.binary()));
+            } else {
+                assert_eq!(software.class(), hardware.class());
+            }
+        }
+    }
+
+    #[test]
+    fn test_random_div() {
+        let mut rng: std::rand::XorShiftRng = SeedableRng::from_seed([13, 14, 15, 16]);
+
+        for _ in std::iter::range(0, 100000000) {
+            let a = SoftF32::new(rng.next_u32());
+            let b = SoftF32::new(rng.next_u32());
+
+            let software = a / b;
+            let hardware = SoftF32::from_f32(a.to_f32() / b.to_f32());
 
             if (hardware.class() != FloatNaN) {
                 assert_eq!((a.binary(), b.binary(), software.binary()), (a.binary(), b.binary(), hardware.binary()));
