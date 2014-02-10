@@ -47,7 +47,7 @@ impl SoftF32 {
     }
 
     pub fn round_and_pack(sign: bool, exponent: int, mantissa: u32) -> SoftF32 {
-        let round_increment = 0x40;
+        let round_increment = 0x8;
         // TODO: Handle other modes than round-to-even;
         let mut exp = exponent;
         let mut man = mantissa;
@@ -68,13 +68,13 @@ impl SoftF32 {
             // TODO: Possibly raise underflow
         }
 
-        let round_bits = man & 0x7F;
+        let round_bits = man & 0x0F;
 
         // TODO: Possibly raise inexact
 
-        man = (man + round_increment) >> 7;
+        man = (man + round_increment) >> 4;
 
-        man = man & !((if (round_bits ^ 0x40) == 0 { 1 } else { 0 }) & 1);
+        man = man & !((if (round_bits ^ 0x08) == 0 { 1 } else { 0 }) & 1);
 
         if man == 0 {
             return SoftF32::pack(sign, 0, 0);
@@ -84,7 +84,7 @@ impl SoftF32 {
     }
 
     pub fn normalize_round_and_pack(sign: bool, exponent: int, mantissa: u32) -> SoftF32 {
-        let shift_count = (mantissa.leading_zeros() - 1) as int;
+        let shift_count = (mantissa.leading_zeros() - 4) as int;
 
         if (shift_count > 31) {
             return SoftF32::round_and_pack(sign, exponent - shift_count, 0);
@@ -172,7 +172,7 @@ fn normalize_subnormal(a_man: u32) -> (int, u32) {
 
 fn add_float(a: &SoftF32, b: &SoftF32, sign: bool) -> SoftF32 {
     let (a_exp, b_exp) = (a.biased_exponent(), b.biased_exponent());
-    let (a_man, b_man) = (a.significand() << 6, b.significand() << 6);
+    let (a_man, b_man) = (a.significand() << 3, b.significand() << 3);
 
     let exp_diff = (a_exp as int) - (b_exp as int);
 
@@ -186,7 +186,7 @@ fn add_float(a: &SoftF32, b: &SoftF32, sign: bool) -> SoftF32 {
 
     let (z_exp, z_man) = if exp_diff == 0 {
         if a_exp == 0 {
-            return SoftF32::pack(sign, 0, (a_man + b_man) >> 6);
+            return SoftF32::pack(sign, 0, (a_man + b_man) >> 3);
         } else {
             (a_exp as int, a_man + b_man)
         }
@@ -194,7 +194,7 @@ fn add_float(a: &SoftF32, b: &SoftF32, sign: bool) -> SoftF32 {
         (a_exp as int, a_man + shift_right_jamming(b_man, exp_diff as u32 - if b_exp == 0 { 1 } else { 0 }))
     };
 
-    if (z_man << 1).leading_zeros() == 0 {
+    if z_man.leading_zeros() < 5 {
         return SoftF32::round_and_pack(sign, z_exp, z_man);
     } else {
         return SoftF32::round_and_pack(sign, z_exp - 1, z_man << 1);
@@ -202,7 +202,7 @@ fn add_float(a: &SoftF32, b: &SoftF32, sign: bool) -> SoftF32 {
 }
 
 fn sub_float(a: &SoftF32, b: &SoftF32, sign: bool) -> SoftF32 {
-    let (a_man, b_man) = (a.significand() << 7, b.significand() << 7);
+    let (a_man, b_man) = (a.significand() << 4, b.significand() << 4);
     let (a_exp, b_exp) = (a.biased_exponent(), b.biased_exponent());
 
     let exp_diff = (a_exp as int) - (b_exp as int);
@@ -308,9 +308,9 @@ impl Mul<SoftF32, SoftF32> for SoftF32 {
         };
 
         let z_exp = a_exp + b_exp - 0x7F;
-        let z_man = shift_right_jamming(((a_man << 7)as u64) * ((b_man << 8) as u64), 32);
+        let z_man = shift_right_jamming(((a_man << 4)as u64) * ((b_man << 5) as u64), 32 - 3);
 
-        if (z_man << 1).leading_zeros() != 0 {
+        if z_man.leading_zeros() > 4 {
             return SoftF32::round_and_pack(z_sign, (z_exp - 1), z_man << 1);
         } else {
             return SoftF32::round_and_pack(z_sign, z_exp, z_man);
@@ -368,7 +368,7 @@ impl Div<SoftF32, SoftF32> for SoftF32 {
             (b_exp as int, b_man)
         };
 
-        let (a_man, b_man) = (a_man << 7, b_man << 8);
+        let (a_man, b_man) = (a_man << 4, b_man << 5);
 
         let (a_man, z_exp) = if b_man <= (a_man << 1) {
             (a_man >> 1, a_exp - b_exp + 0x7E)
@@ -376,9 +376,9 @@ impl Div<SoftF32, SoftF32> for SoftF32 {
             (a_man, a_exp - b_exp + 0x7D)
         };
 
-        let z_man = ((a_man as u64) << 32) / (b_man as u64);
+        let z_man = ((a_man as u64) << 29) / (b_man as u64);
 
-        if (z_man & 0x3F) == 0 {
+        if (z_man & 0x07) == 0 {
             let t = ((b_man as u64) * z_man) != ((a_man as u64) << 32);
             return SoftF32::round_and_pack(z_sign, z_exp, (z_man | if t { 1 } else { 0 }) as u32);
         } else {
