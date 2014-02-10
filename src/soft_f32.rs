@@ -161,84 +161,56 @@ fn propagate_nan(a: &SoftF32, b: &SoftF32) -> SoftF32 {
 }
 
 fn add_float(a: &SoftF32, b: &SoftF32, sign: bool) -> SoftF32 {
-    let mut a_man = a.significand() << 6;
-    let mut b_man = b.significand() << 6;
-
     let (a_exp, b_exp) = (a.biased_exponent(), b.biased_exponent());
+    let (a_man, b_man) = (a.significand() << 6, b.significand() << 6);
 
     let exp_diff = (a_exp as int) - (b_exp as int);
 
-    let z_exp = if exp_diff > 0 {
-        if a_exp == MAX_BIASED_EXP {
-            return if (a_man != 0) { propagate_nan(a, b) } else { a.clone() };
+    if a_exp == MAX_BIASED_EXP {
+        if (a_man != 0) || ((b_exp == MAX_BIASED_EXP) && (b_man != 0)) {
+            return propagate_nan(a, b);
+        } else {
+            return a.clone();
         }
+    }
 
-        b_man = shift_right_jamming(b_man, exp_diff as u32 - if b_exp == 0 { 1 } else { 0 });
-
-        a_exp as int
-    } else if exp_diff < 0 {
-        if b_exp == MAX_BIASED_EXP {
-            return if (b_man != 0) { propagate_nan(a, b) } else { b.clone() };
-        }
-
-        a_man = shift_right_jamming(a_man, (-exp_diff) as u32 - if a_exp == 0 { 1 } else { 0 });
-
-        b_exp as int
-    } else {
-        if a_exp == MAX_BIASED_EXP {
-            return if (a_man != 0 || b_man != 0) { propagate_nan(a, b) } else { a.clone() };
-        }
-
+    let (z_exp, z_man) = if exp_diff == 0 {
         if a_exp == 0 {
             return SoftF32::pack(sign, 0, (a_man + b_man) >> 6);
         } else {
-            a_exp as int
+            (a_exp as int, a_man + b_man)
         }
+    } else {
+        (a_exp as int, a_man + shift_right_jamming(b_man, exp_diff as u32 - if b_exp == 0 { 1 } else { 0 }))
     };
 
-    let z_man = (a_man + b_man) << 1;
-
-    if z_man.leading_zeros() == 0 {
-        return SoftF32::round_and_pack(sign, z_exp, a_man + b_man);
+    if (z_man << 1).leading_zeros() == 0 {
+        return SoftF32::round_and_pack(sign, z_exp, z_man);
     } else {
-        return SoftF32::round_and_pack(sign, z_exp - 1, z_man);
+        return SoftF32::round_and_pack(sign, z_exp - 1, z_man << 1);
     }
 }
 
 fn sub_float(a: &SoftF32, b: &SoftF32, sign: bool) -> SoftF32 {
-    let mut a_man = a.significand() << 7;
-    let mut b_man = b.significand() << 7;
-
-    let mut a_exp = a.biased_exponent();
-    let mut b_exp = b.biased_exponent();
+    let (a_man, b_man) = (a.significand() << 7, b.significand() << 7);
+    let (a_exp, b_exp) = (a.biased_exponent(), b.biased_exponent());
 
     let exp_diff = (a_exp as int) - (b_exp as int);
 
+    // TODO: Raise flags?
+    if a_exp == MAX_BIASED_EXP {
+        return if (a_man != 0) || ((b_exp == MAX_BIASED_EXP) && b_man != 0) {
+            propagate_nan(a, b)
+        } else {
+            a.clone()
+        };
+    }
+
     let (z_man, z_exp, z_sign) = if exp_diff > 0 {
-        if a_exp == MAX_BIASED_EXP {
-            return if (a_man != 0) { propagate_nan(a, b) } else { a.clone() };
-        }
-
-        b_man = shift_right_jamming(b_man, exp_diff as u32 - if b_exp == 0 { 1 } else { 0 });
-
-        (a_man - b_man, a_exp, sign)
-    } else if exp_diff < 0 {
-        if b_exp == MAX_BIASED_EXP {
-            return if (b_man != 0) { propagate_nan(a, b) } else { SoftF32::pack(!sign, MAX_BIASED_EXP, 0) };
-        }
-
-        a_man = shift_right_jamming(a_man, (-exp_diff) as u32 - if a_exp == 0 { 1 } else { 0 });
-
-        (b_man - a_man, b_exp, !sign)
-    } else if a_exp == MAX_BIASED_EXP {
-        // TODO: Raise invalid flag?
-
-        return if (a_man != 0 || b_man != 0) { propagate_nan(a, b) } else { a.clone() };
+        (a_man - shift_right_jamming(b_man, exp_diff as u32 - if b_exp == 0 { 1 } else { 0 }), a_exp, sign)
     } else {
         if a_man > b_man {
             (a_man - b_man, if a_exp == 0 { 1 } else { a_exp }, sign)
-        } else if a_man < b_man {
-            (b_man - a_man, if b_exp == 0 { 1 } else { b_exp }, !sign)
         } else {
             return SoftF32::pack(true, 0, 0);
         }
@@ -255,20 +227,34 @@ impl Neg<SoftF32> for SoftF32 {
 
 impl Add<SoftF32, SoftF32> for SoftF32 {
     fn add(&self, other: &SoftF32) -> SoftF32 {
-        if (self.sign() == other.sign()) {
-            return add_float(self, other, self.sign());
+        let a_abs = self.binary() & (EXP_MASK | MAN_MASK);
+        let b_abs = other.binary() & (EXP_MASK | MAN_MASK);
+
+        let swap = (a_abs < b_abs);
+
+        let (a, b) = if swap { (other, self) } else { (self, other) };
+
+        return if (self.sign() == other.sign()) {
+            add_float(a, b, self.sign())
         } else {
-            return sub_float(self, other, self.sign());
+            sub_float(a, b, self.sign() ^ swap)
         }
     }
 }
 
 impl Sub<SoftF32, SoftF32> for SoftF32 {
     fn sub(&self, other: &SoftF32) -> SoftF32 {
+        let a_abs = self.binary() & (EXP_MASK | MAN_MASK);
+        let b_abs = other.binary() & (EXP_MASK | MAN_MASK);
+
+        let swap = (a_abs < b_abs);
+
+        let (a, b) = if swap { (other, self) } else { (self, other) };
+
         if (self.sign() == other.sign()) {
-            return sub_float(self, other, self.sign());
+            return sub_float(a, b, self.sign() ^ swap);
         } else {
-            return add_float(self, other, self.sign());
+            return add_float(a, b, self.sign());
         }
     }
 }
@@ -320,6 +306,24 @@ mod tests {
         }
     }))
 
+    macro_rules! test_sub(($a:expr, $b:expr, $r:expr) => ({
+        let (a, b, r) = (SoftF32::new($a), SoftF32::new($b), SoftF32::new($r));
+
+        let sum = a - b;
+
+        assert_eq!(sum.class(), r.class());
+
+        if (r.class() != FloatNaN) {
+            // println!("h: {:?} exp: {:?} sig: {:t}", r.sign(), r.biased_exponent(), r.significand_field());
+            // println!("s: {:?} exp: {:?} sig: {:t}", sum.sign(), sum.biased_exponent(), sum.significand_field());
+
+            assert_eq!(sum.sign(), r.sign());
+            assert_eq!(sum.biased_exponent(), r.biased_exponent());
+            assert_eq!(sum.significand_field(), r.significand_field());
+            assert_eq!(sum.binary(), r.binary());
+        }
+    }))
+
     #[test]
     fn test_specific_add() {
         test_add!(   8388750u32,   25174430u32,   27271618u32);
@@ -330,6 +334,12 @@ mod tests {
         test_add!(3065323245u32,  914535169u32, 3049893808u32);
         test_add!( 430114522u32,  428316865u32,  437604302u32);
         test_add!(  13624552u32, 2153752233u32,    7355967u32);
+    }
+
+    #[test]
+    fn test_specific_sub() {
+        test_sub!( 126869781u32, 3102201224u32,  954717576u32);
+        test_sub!( 126869781u32, 3102201224u32,  954717576u32);
     }
 
     #[test]
