@@ -17,11 +17,15 @@
 #[crate_id = "github.com/bjz/ieee754-rs#ieee754:0.1"];
 #[comment = "IEE754 floating point math."];
 
+#[feature(macro_rules)];
+
 pub mod f32;    // b32 ?
 pub mod f64;    // b64 ?
 // pub mod f128;   // b128 ?
 // pub mod d64;
 // pub mod d128;
+
+pub mod soft_f32;
 
 // TODO: setBinaryRoundingDirection
 // TODO: getBinaryRoundingDirection
@@ -39,6 +43,7 @@ pub mod f64;    // b64 ?
 // TODO: restoreFlags
 // TODO: saveAllFlags
 
+#[deriving(Eq)]
 pub enum FloatClass {
     FloatZero,
     FloatSubnormal,
@@ -52,6 +57,16 @@ pub enum FloatClass {
 pub enum Radix {
     Radix2  = 2,
     Radix10 = 10,
+}
+
+pub trait BinaryInterchange<BinaryFormat> {
+    fn binary(&self) -> BinaryFormat;
+
+    fn sign(&self) -> bool;
+    fn exponent(&self) -> BinaryFormat;
+    fn biased_exponent(&self) -> BinaryFormat;
+    fn significand(&self) -> BinaryFormat;
+    fn significand_field(&self) -> BinaryFormat;
 }
 
 /// A floating point number that conforms to specifications laid out in the IEEE
